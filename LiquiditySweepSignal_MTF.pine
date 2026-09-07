@@ -1,0 +1,176 @@
+//@version=5
+indicator("Liquidity Sweep Signal MTF [XAUUSD/XAGUSD/BTCUSD]", overlay=true, max_bars_back=5000)
+
+// ============================================================================
+// INPUT PARAMETERS
+// ============================================================================
+
+// Liquidity Detection Settings
+group_liquidity = "LIQUIDITY DETECTION"
+lookback = input.int(defval=20, title="Lookback Bars", minval=10, maxval=100, group=group_liquidity)
+sweep_threshold = input.float(defval=0.5, title="Sweep Threshold (%)", minval=0.1, maxval=2.0, group=group_liquidity)
+min_sweep_distance = input.int(defval=5, title="Min Bars Since Pivot", minval=3, maxval=20, group=group_liquidity)
+
+// Multi-Timeframe Settings
+group_mtf = "MULTI-TIMEFRAME"
+use_4h_confirmation = input.bool(defval=true, title="Require 4H Confirmation", group=group_mtf)
+mtf_trend_strength = input.float(defval=2.0, title="4H Trend Strength Multiplier", minval=0.5, maxval=5.0, group=group_mtf)
+
+// Signal Filtering
+group_filter = "SIGNAL FILTERING"
+min_candle_size = input.float(defval=0.3, title="Min Candle Size (%)", minval=0.1, maxval=1.0, group=group_filter)
+rsi_period = input.int(defval=14, title="RSI Period for Confirmation", minval=7, maxval=28, group=group_filter)
+rsi_upper = input.int(defval=70, title="RSI Overbought Level", minval=50, maxval=90, group=group_filter)
+rsi_lower = input.int(defval=30, title="RSI Oversold Level", minval=10, maxval=50, group=group_filter)
+
+// Display Settings
+group_display = "DISPLAY"
+show_pivots = input.bool(defval=true, title="Show Pivot Points", group=group_display)
+show_levels = input.bool(defval=true, title="Show Liquidity Levels", group=group_display)
+show_alerts = input.bool(defval=true, title="Show Alert Labels", group=group_display)
+
+// ============================================================================
+// CORE CALCULATIONS
+// ============================================================================
+
+// Calculate pivots
+pivot_high = ta.highest(high, lookback)
+pivot_low = ta.lowest(low, lookback)
+
+// Identify recent swing highs and lows
+recent_high = ta.highest(high[1], lookback)[1]
+recent_low = ta.lowest(low[1], lookback)[1]
+
+// Calculate ATR for volatility adjustment
+atr = ta.atr(14)
+atr_ratio = atr / close * 100
+
+// RSI for overbought/oversold confirmation
+rsi = ta.rsi(close, rsi_period)
+
+// ============================================================================
+// LIQUIDITY SWEEP DETECTION - 15 MIN FRAME
+// ============================================================================
+
+// Check for upside sweep (break above recent high + close below it)
+upside_break = high > recent_high
+upside_sweep = upside_break and close < recent_high and close > open
+
+// Check for downside sweep (break below recent low + close above it)
+downside_break = low < recent_low
+downside_sweep = downside_break and close > recent_low and close < open
+
+// Sweep confirmation: Price must retrace to sweep level within sweep_threshold
+sweep_distance_up = ((high - recent_high) / recent_high) * 100
+sweep_distance_down = ((recent_low - low) / recent_low) * 100
+
+// Valid sweep conditions
+valid_upside_sweep = upside_sweep and sweep_distance_up <= sweep_threshold and sweep_distance_up > 0.1
+valid_downside_sweep = downside_sweep and sweep_distance_down <= sweep_threshold and sweep_distance_down > 0.1
+
+// ============================================================================
+// 4-HOUR TIMEFRAME CONFIRMATION
+// ============================================================================
+
+// Request 4H data
+h4_high = request.security(syminfo.tickerid, "240", high)
+h4_low = request.security(syminfo.tickerid, "240", low)
+h4_close = request.security(syminfo.tickerid, "240", close)
+h4_open = request.security(syminfo.tickerid, "240", open)
+h4_atr = request.security(syminfo.tickerid, "240", ta.atr(14))
+
+// 4H trend detection
+h4_ma_fast = ta.sma(h4_close, 9)
+h4_ma_slow = ta.sma(h4_close, 21)
+h4_uptrend = h4_ma_fast > h4_ma_slow
+h4_downtrend = h4_ma_fast < h4_ma_slow
+
+// 4H momentum
+h4_rsi = ta.rsi(h4_close, 14)
+h4_strong_bullish = h4_rsi > 55 and h4_rsi < 80
+h4_strong_bearish = h4_rsi < 45 and h4_rsi > 20
+
+// ============================================================================
+// SIGNAL GENERATION
+// ============================================================================
+
+// Bullish signal conditions (BUY)
+bullish_signal = valid_upside_sweep and 
+                 rsi < rsi_upper and 
+                 (not use_4h_confirmation or (h4_uptrend and h4_strong_bullish)) and
+                 atr_ratio < 2.0
+
+// Bearish signal conditions (SELL)
+bearish_signal = valid_downside_sweep and 
+                 rsi > rsi_lower and 
+                 (not use_4h_confirmation or (h4_downtrend and h4_strong_bearish)) and
+                 atr_ratio < 2.0
+
+// Additional confirmation: Volume and candle size
+current_candle_size = ((high - low) / close) * 100
+large_candle = current_candle_size > min_candle_size
+
+bullish_signal := bullish_signal and large_candle
+bearish_signal := bearish_signal and large_candle
+
+// ============================================================================
+// VISUALIZATIONS
+// ============================================================================
+
+// Plot pivot points
+if show_pivots
+    plot(pivot_high, title="Pivot High", color=color.new(color.red, 50), linewidth=1)
+    plot(pivot_low, title="Pivot Low", color=color.new(color.blue, 50), linewidth=1)
+
+// Plot liquidity sweep levels
+plot(recent_high, title="Recent High (Liquidity)", color=color.new(color.orange, 60), linewidth=2, style=plot.style_dashed)
+plot(recent_low, title="Recent Low (Liquidity)", color=color.new(color.teal, 60), linewidth=2, style=plot.style_dashed)
+
+// Signal markers
+plotshape(bullish_signal, title="Bullish Sweep Signal", location=location.belowbar, 
+          shape=shape.labelup, size=size.large, color=color.new(color.green, 0), 
+          textcolor=color.white, text="BUY\nSWEEP")
+
+plotshape(bearish_signal, title="Bearish Sweep Signal", location=location.abovebar, 
+          shape=shape.labeldown, size=size.large, color=color.new(color.red, 0), 
+          textcolor=color.white, text="SELL\nSWEEP")
+
+// ============================================================================
+// ALERT GENERATION
+// ============================================================================
+
+if bullish_signal
+    alert("🟢 BULLISH SWEEP SIGNAL - " + syminfo.tickerid + " - 4H: " + (h4_uptrend ? "UPTREND" : "MIXED"), alert.freq_once_per_bar_close)
+    
+if bearish_signal
+    alert("🔴 BEARISH SWEEP SIGNAL - " + syminfo.tickerid + " - 4H: " + (h4_downtrend ? "DOWNTREND" : "MIXED"), alert.freq_once_per_bar_close)
+
+// ============================================================================
+// DEBUG INFO (Comment out for production)
+// ============================================================================
+
+var table debug_table = table.new(position.top_right, 4, 8, border_color=color.gray, frame_color=color.gray)
+
+if show_alerts
+    table.cell(debug_table, 0, 0, "SWEEP ANALYSIS", text_color=color.white, bgcolor=color.navy, text_size=size.small)
+    table.cell(debug_table, 1, 0, "", text_size=size.small)
+    table.cell(debug_table, 2, 0, "", text_size=size.small)
+    table.cell(debug_table, 3, 0, "", text_size=size.small)
+    
+    table.cell(debug_table, 0, 1, "UP Sweep: " + str.tostring(valid_upside_sweep), text_color=color.white, bgcolor=color.new(color.blue, 80), text_size=size.small)
+    table.cell(debug_table, 0, 2, "DN Sweep: " + str.tostring(valid_downside_sweep), text_color=color.white, bgcolor=color.new(color.blue, 80), text_size=size.small)
+    table.cell(debug_table, 0, 3, "RSI: " + str.tostring(math.round(rsi, 2)), text_color=color.white, bgcolor=color.new(color.blue, 80), text_size=size.small)
+    table.cell(debug_table, 0, 4, "4H Trend: " + (h4_uptrend ? "📈" : h4_downtrend ? "📉" : "➡️"), text_color=color.white, bgcolor=color.new(color.blue, 80), text_size=size.small)
+    table.cell(debug_table, 0, 5, "4H RSI: " + str.tostring(math.round(h4_rsi, 2)), text_color=color.white, bgcolor=color.new(color.blue, 80), text_size=size.small)
+    table.cell(debug_table, 0, 6, "Candle %: " + str.tostring(math.round(current_candle_size, 2)), text_color=color.white, bgcolor=color.new(color.blue, 80), text_size=size.small)
+    table.cell(debug_table, 0, 7, "Signal: " + (bullish_signal ? "🟢 BUY" : bearish_signal ? "🔴 SELL" : "⏳"), text_color=color.white, bgcolor=color.new(color.blue, 80), text_size=size.small)
+
+// ============================================================================
+// EXPORTABLE SIGNALS (For external strategy)
+// ============================================================================
+
+// These variables can be used in external strategies
+export bullish = bullish_signal
+export bearish = bearish_signal
+export h4_confirmation = h4_uptrend or h4_downtrend
+export signal_strength = math.abs(rsi - 50) / 50

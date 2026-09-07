@@ -1,0 +1,172 @@
+//@version=5
+strategy("Liquidity Sweep Trading Strategy [XAUUSD/XAGUSD/BTCUSD]", overlay=true, 
+         default_qty_type=strategy.percent_of_equity, default_qty_value=5, 
+         initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.001)
+
+// ============================================================================
+// STRATEGY PARAMETERS
+// ============================================================================
+
+group_trade = "TRADE SETTINGS"
+risk_per_trade = input.float(defval=2.0, title="Risk Per Trade (%)", minval=0.5, maxval=5.0, group=group_trade)
+tp_multiplier = input.float(defval=2.5, title="TP/SL Ratio", minval=1.5, maxval=5.0, group=group_trade)
+max_positions = input.int(defval=3, title="Max Concurrent Positions", minval=1, maxval=5, group=group_trade)
+
+group_liquidity = "LIQUIDITY DETECTION"
+lookback = input.int(defval=20, title="Lookback Bars", minval=10, maxval=100, group=group_liquidity)
+sweep_threshold = input.float(defval=0.5, title="Sweep Threshold (%)", minval=0.1, maxval=2.0, group=group_liquidity)
+
+group_mtf = "MULTI-TIMEFRAME CONFIRMATION"
+use_4h = input.bool(defval=true, title="Require 4H Confirmation", group=group_mtf)
+rsi_period = input.int(defval=14, title="RSI Period", minval=7, maxval=28, group=group_mtf)
+
+group_exit = "EXIT STRATEGY"
+trailing_stop = input.bool(defval=true, title="Use Trailing Stop", group=group_exit)
+trailing_percent = input.float(defval=1.0, title="Trailing Stop %", minval=0.1, maxval=3.0, group=group_exit)
+max_hold_bars = input.int(defval=100, title="Max Hold Time (Bars)", minval=10, maxval=500, group=group_exit)
+
+// ============================================================================
+// CORE CALCULATIONS
+// ============================================================================
+
+recent_high = ta.highest(high[1], lookback)[1]
+recent_low = ta.lowest(low[1], lookback)[1]
+
+upside_break = high > recent_high
+downside_break = low < recent_low
+
+upside_sweep = upside_break and close < recent_high and close > open
+downside_sweep = downside_break and close > recent_low and close < open
+
+sweep_distance_up = ((high - recent_high) / recent_high) * 100
+sweep_distance_down = ((recent_low - low) / recent_low) * 100
+
+valid_upside_sweep = upside_sweep and sweep_distance_up <= sweep_threshold and sweep_distance_up > 0.1
+valid_downside_sweep = downside_sweep and sweep_distance_down <= sweep_threshold and sweep_distance_down > 0.1
+
+// RSI Confirmation
+rsi = ta.rsi(close, rsi_period)
+
+// 4-Hour Confirmation
+h4_close = request.security(syminfo.tickerid, "240", close)
+h4_ma_fast = request.security(syminfo.tickerid, "240", ta.sma(close, 9))
+h4_ma_slow = request.security(syminfo.tickerid, "240", ta.sma(close, 21))
+h4_rsi = request.security(syminfo.tickerid, "240", ta.rsi(close, 14))
+
+h4_uptrend = h4_ma_fast > h4_ma_slow
+h4_downtrend = h4_ma_fast < h4_ma_slow
+h4_strong_bullish = h4_rsi > 55 and h4_rsi < 80
+h4_strong_bearish = h4_rsi < 45 and h4_rsi > 20
+
+// ============================================================================
+// SIGNAL GENERATION
+// ============================================================================
+
+current_candle_size = ((high - low) / close) * 100
+
+bullish_signal = valid_upside_sweep and rsi < 70 and current_candle_size > 0.3 and
+                 (not use_4h or (h4_uptrend and h4_strong_bullish))
+
+bearish_signal = valid_downside_sweep and rsi > 30 and current_candle_size > 0.3 and
+                 (not use_4h or (h4_downtrend and h4_strong_bearish))
+
+// ============================================================================
+// POSITION TRACKING
+// ============================================================================
+
+var float entry_price = na
+var float highest_price = na
+var float lowest_price = na
+var int entry_bar = na
+var string position_type = na
+
+// ============================================================================
+// ENTRY CONDITIONS
+// ============================================================================
+
+long_entry = bullish_signal and strategy.opentrades < max_positions
+short_entry = bearish_signal and strategy.opentrades < max_positions
+
+if long_entry
+    entry_price := close
+    highest_price := high
+    lowest_price := low
+    entry_bar := bar_index
+    position_type := "LONG"
+    strategy.entry("Long_" + str.tostring(bar_index), strategy.long)
+
+if short_entry
+    entry_price := close
+    highest_price := high
+    lowest_price := low
+    entry_bar := bar_index
+    position_type := "SHORT"
+    strategy.entry("Short_" + str.tostring(bar_index), strategy.short)
+
+// ============================================================================
+// STOP LOSS & TAKE PROFIT CALCULATION
+// ============================================================================
+
+if strategy.position_size != 0
+    if strategy.position_size > 0  // Long position
+        highest_price := math.max(highest_price, high)
+        
+        // Static Stop Loss
+        sl_long = entry_price * (1 - (sweep_distance_up * 2) / 100)
+        tp_long = entry_price + (entry_price - sl_long) * tp_multiplier
+        
+        // Trailing Stop
+        if trailing_stop
+            trail_sl = highest_price * (1 - trailing_percent / 100)
+            sl_long := math.max(sl_long, trail_sl)
+        
+        // Exit conditions
+        exit_time = bar_index - entry_bar >= max_hold_bars
+        
+        if close <= sl_long or close >= tp_long or exit_time
+            strategy.close("Long_" + str.tostring(entry_bar), comment="Exit")
+            entry_price := na
+    
+    else if strategy.position_size < 0  // Short position
+        lowest_price := math.min(lowest_price, low)
+        
+        // Static Stop Loss
+        sl_short = entry_price * (1 + (sweep_distance_down * 2) / 100)
+        tp_short = entry_price - (sl_short - entry_price) * tp_multiplier
+        
+        // Trailing Stop
+        if trailing_stop
+            trail_sl = lowest_price * (1 + trailing_percent / 100)
+            sl_short := math.min(sl_short, trail_sl)
+        
+        // Exit conditions
+        exit_time = bar_index - entry_bar >= max_hold_bars
+        
+        if close >= sl_short or close <= tp_short or exit_time
+            strategy.close("Short_" + str.tostring(entry_bar), comment="Exit")
+            entry_price := na
+
+// ============================================================================
+// VISUALIZATIONS
+// ============================================================================
+
+// Liquidity Levels
+plot(recent_high, title="Liquidity High", color=color.new(color.orange, 60), linewidth=2, style=plot.style_dashed)
+plot(recent_low, title="Liquidity Low", color=color.new(color.teal, 60), linewidth=2, style=plot.style_dashed)
+
+// Entry Signals
+plotshape(bullish_signal, title="Long Signal", location=location.belowbar, shape=shape.labelup, 
+          size=size.large, color=color.new(color.green, 0), textcolor=color.white, text="BUY")
+
+plotshape(bearish_signal, title="Short Signal", location=location.abovebar, shape=shape.labeldown, 
+          size=size.large, color=color.new(color.red, 0), textcolor=color.white, text="SELL")
+
+// ============================================================================
+// ALERTS
+// ============================================================================
+
+if bullish_signal
+    alert("🟢 BUY SIGNAL: " + syminfo.tickerid + " | 4H: " + (h4_uptrend ? "UPTREND ✓" : "CHECK"), alert.freq_once_per_bar)
+
+if bearish_signal
+    alert("🔴 SELL SIGNAL: " + syminfo.tickerid + " | 4H: " + (h4_downtrend ? "DOWNTREND ✓" : "CHECK"), alert.freq_once_per_bar)
